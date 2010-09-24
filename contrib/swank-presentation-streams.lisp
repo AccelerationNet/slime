@@ -80,64 +80,77 @@ be sensitive and remember what object it is in the repl if predicate is true"
 	       :directory (pathname-directory
 			   swank-loader:*source-directory*)))))))
 
-(let ((last-stream nil)
-      (last-answer nil))
+(defvar *dedicated-presentation-streams* nil
+  "A list of other streams that the presentation-streams system should
+consider to be dedicated output streams; i.e. will respond correctly
+to the process filter protocol embedding escape sequences in the string.
+")
+
+(let ((last (cons nil nil)))
+  ;;we use a single cons cell as an atomic pair so that even if
+  ;;multiple threads are running and set/stomp on this 'last
+  ;;reference, the pair of information (stream slime-stream-p) that
+  ;;last points to will be consistent.
+
   (defun slime-stream-p (stream)
     "Check if stream is one of the slime streams, since if it isn't we
 don't want to present anything.
-Two special return values: 
+Two special return values:
 :DEDICATED -- Output ends up on a dedicated output stream
 :REPL-RESULT -- Output ends up on the :repl-results target.
 "
-    (if (eq last-stream stream)
-	last-answer
-	(progn
-	  (setq last-stream stream)
-	  (if (eq stream t) 
-	      (setq stream *standard-output*))
-	  (setq last-answer 
-		(or #+openmcl 
-		    (and (typep stream 'ccl::xp-stream) 
+    (if (eq stream t)
+	(setq stream *standard-output*))
+    (let ((last last))	 ; get the ref we will use for this invocation
+      (when (eql (car last) stream)
+	    (return-from slime-stream-p (cdr last))))
+    (let ((ans
+	   (or #+openmcl
+	       (and (typep stream 'ccl::xp-stream)
 					;(slime-stream-p (ccl::xp-base-stream (slot-value stream 'ccl::xp-structure)))
-			 (slime-stream-p (ccl::%svref (slot-value stream 'ccl::xp-structure) 1)))
-		    #+cmu
-		    (or (and (typep stream 'lisp::indenting-stream)
-			     (slime-stream-p (lisp::indenting-stream-stream stream)))
-			(and (typep stream 'pretty-print::pretty-stream)
-			     (fboundp 'pretty-print::enqueue-annotation)
-			     (let ((slime-stream-p
-				    (slime-stream-p (pretty-print::pretty-stream-target stream))))
-			       (and ;; Printing through CMUCL pretty
-				    ;; streams is only cleanly
-				    ;; possible if we are using the
-				    ;; bridge-less protocol with
-				    ;; annotations, because the bridge
-				    ;; escape sequences disturb the
-				    ;; pretty printer layout.
-				    (not (eql slime-stream-p :dedicated-output))
-				    ;; If OK, return the return value
-				    ;; we got from slime-stream-p on
-				    ;; the target stream (could be
-				    ;; :repl-result):
-				    slime-stream-p))))
-		    #+sbcl
-		    (let ()
-		      (declare (notinline sb-pretty::pretty-stream-target))
-		      (and (typep stream (find-symbol "PRETTY-STREAM" 'sb-pretty))
-                           (find-symbol "ENQUEUE-ANNOTATION" 'sb-pretty)
-                           (not *use-dedicated-output-stream*)
-                           (slime-stream-p (sb-pretty::pretty-stream-target stream))))
-		    #+allegro
-		    (and (typep stream 'excl:xp-simple-stream)
-			 (slime-stream-p (excl::stream-output-handle stream)))
-		    (loop for connection in *connections*
-			  thereis (or (and (eq stream (connection.dedicated-output connection))
-					   :dedicated)
-				      (eq stream (connection.socket-io connection))
-				      (eq stream (connection.user-output connection))
-				      (eq stream (connection.user-io connection))
-				      (and (eq stream (connection.repl-results connection))
-					   :repl-result)))))))))
+		    (slime-stream-p (ccl::%svref (slot-value stream 'ccl::xp-structure) 1)))
+	       #+cmu
+	       (or (and (typep stream 'lisp::indenting-stream)
+			(slime-stream-p (lisp::indenting-stream-stream stream)))
+		   (and (typep stream 'pretty-print::pretty-stream)
+			(fboundp 'pretty-print::enqueue-annotation)
+			(let ((slime-stream-p
+			       (slime-stream-p (pretty-print::pretty-stream-target stream))))
+			  (and ;; Printing through CMUCL pretty
+			   ;; streams is only cleanly
+			   ;; possible if we are using the
+			   ;; bridge-less protocol with
+			   ;; annotations, because the bridge
+			   ;; escape sequences disturb the
+			   ;; pretty printer layout.
+			   (not (eql slime-stream-p :dedicated-output))
+			   ;; If OK, return the return value
+			   ;; we got from slime-stream-p on
+			   ;; the target stream (could be
+			   ;; :repl-result):
+			   slime-stream-p))))
+	       #+sbcl
+	       (let ()
+		 (declare (notinline sb-pretty::pretty-stream-target))
+		 (and (typep stream (find-symbol "PRETTY-STREAM" 'sb-pretty))
+		      (find-symbol "ENQUEUE-ANNOTATION" 'sb-pretty)
+		      (not *use-dedicated-output-stream*)
+		      (slime-stream-p (sb-pretty::pretty-stream-target stream))))
+	       #+allegro
+	       (and (typep stream 'excl:xp-simple-stream)
+		    (slime-stream-p (excl::stream-output-handle stream)))
+               (and *use-dedicated-output-stream*
+                    (member stream *dedicated-presentation-streams*) :dedicated)
+	       (loop for connection in *connections*
+		     thereis (or (and (eq stream (connection.dedicated-output connection))
+				      :dedicated)
+				 (eq stream (connection.socket-io connection))
+				 (eq stream (connection.user-output connection))
+				 (eq stream (connection.user-io connection))
+				 (and (eq stream (connection.repl-results connection))
+				      :repl-result))))))
+      (setq last (cons stream ans))
+      ans)))
 
 (defun can-present-readable-objects (&optional stream)
   (declare (ignore stream))
@@ -213,14 +226,13 @@ says that I am starting to print an object with this id. The second says I am fi
   ;; this declare special is to let the compiler know that *record-repl-results* will eventually be
   ;; a global special, even if it isn't when this file is compiled/loaded.
   (declare (special *record-repl-results*))
-  (let ((slime-stream-p 
-	 (and *record-repl-results* (slime-stream-p stream))))
+  (let* ((slime-stream-p
+	  (and *record-repl-results* (slime-stream-p stream)))
+	 (target (find slime-stream-p '(:repl-result :dedicated))))
     (if slime-stream-p
 	(let* ((pid (swank::save-presented-object object))
 	       (record (make-presentation-record :id pid :printed-p nil
-						 :target (if (eq slime-stream-p :repl-result)
-							     :repl-result
-							     nil))))
+						 :target target)))
 	  (write-annotation stream #'presentation-start record)
 	  (multiple-value-prog1
 	      (funcall continue)
