@@ -103,8 +103,12 @@
       (let ((highlight (match-string 1)))
         ;; Can't use (replace-match highlight) here -- broken in Emacs 21
         (delete-region (match-beginning 0) (match-end 0))
-	(slime-insert-propertized '(face highlight) highlight)))
+	(slime-insert-propertized '(face eldoc-highlight-function-argument) highlight)))
     (buffer-substring (point-min) (point-max))))
+
+(define-obsolete-function-alias 'slime-fontify-string
+  'slime-autodoc--fontify
+  "SLIME 2.10")
 
 
 ;;;; Autodocs (automatic context-sensitive help)
